@@ -1,0 +1,18 @@
+[package]
+name = "quicksilver"
+version = "0.1.0"
+edition = "2026"
+authors = ["Billy-79"]
+
+[[bin]]
+name = "qs"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.26.3"
+crossterm = "0.27.0"
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0"
+chrono = "0.4"
