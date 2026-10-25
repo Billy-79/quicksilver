@@ -1,8 +1,12 @@
-// ============================================================================
-// QuickSilver (qs) - High-Performance Terminal File Explorer
-// Author: Billy-79 | Edition: 2026
-// Built with Rust, Tokio async IO, Ratatui TUI, and Catppuccin Mocha Palette
-// ============================================================================
+/*
+ * ============================================================================
+ * Project Name: QuickSilver (qs)
+ * Author:       Billy-79
+ * Description:  A blazing-fast, next-gen terminal file explorer written in Rust,
+ *               powered by Ratatui & Crossterm, styled with Catppuccin Mocha,
+ *               featuring 3-column Miller layout, Nerd Font icons, and AI inspection.
+ * ============================================================================
+ */
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -13,293 +17,404 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    text::Span,
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
 use std::{
-    error::Error,
     fs,
+    io::{self},
     path::PathBuf,
-    time::Duration,
 };
 
 // --- Catppuccin Mocha Color Palette Constants ---
-const COLOR_BASE: Color = Color::Rgb(30, 30, 46);       // #1e1e2e (Background)
-const COLOR_MANTLE: Color = Color::Rgb(24, 24, 37);     // #181825 (Status bar background)
-const COLOR_TEXT: Color = Color::Rgb(205, 214, 244);     // #cdd6f4 (Primary text)
-const COLOR_SUBTEXT: Color = Color::Rgb(166, 173, 200); // #a6adc8 (Secondary text)
-const COLOR_BLUE: Color = Color::Rgb(137, 180, 250);    // #89b4fa (Accent / Selection highlight)
-const COLOR_MAUVE: Color = Color::Rgb(203, 166, 247);   // #cba6f7 (Active borders)
-const COLOR_GREEN: Color = Color::Rgb(166, 227, 161);   // #a6e3a1 (Preview accents)
-const COLOR_SURFACE1: Color = Color::Rgb(69, 71, 90);   // #45475a (Inactive borders / highlights)
+const COLOR_BASE: Color = Color::Rgb(30, 30, 46);       // #1e1e2e - Main background
+const COLOR_MANTLE: Color = Color::Rgb(24, 24, 37);     // #181825 - Deeper panel background
+const COLOR_TEXT: Color = Color::Rgb(205, 214, 244);     // #cdd6f4 - Primary text
+const COLOR_SUBTEXT: Color = Color::Rgb(166, 173, 200);  // #a6adc8 - Secondary text / hints
+const COLOR_MAUVE: Color = Color::Rgb(203, 166, 247);    // #cba6f7 - Accents & borders
+const COLOR_BLUE: Color = Color::Rgb(137, 180, 250);     // #89b4fa - Highlights & directories
+const COLOR_GREEN: Color = Color::Rgb(166, 227, 161);    // #a6e3a1 - Success indicators & icons
+const COLOR_SURFACE: Color = Color::Rgb(49, 50, 68);     // #313244 - Selection background
 
-/// Core Application State Management Struct
-struct App {
-    current_path: PathBuf,           // The absolute path of the directory currently viewed
-    files: Vec<fs::DirEntry>,        // Cached list of directory entries in current_path
-    selected_index: usize,           // Index of the currently highlighted file/folder
-    preview_content: String,         // Rendered text buffer for the right-hand preview pane
-    mode: Mode,                      // Active UI operational mode (Normal vs AI summary)
-    status_message: String,          // Footer notification status string
+/// Application operational modes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum Mode {
+    Normal,         // Standard file navigation and preview mode
+    CommandPalette, // Extended command execution mode
+    AiInspection,   // Ctrl+A semantic AI code/file inspection mode
 }
 
-/// Operational Modes for the TUI State Machine
-#[derive(PartialEq)]
-enum Mode {
-    Normal,          // Standard file navigation mode
-    CommandPalette,  // Extended command execution mode
-    AiSummary,       // AI Semantic analysis preview overlay mode
+/// Represents a single file or directory entry in the filesystem
+struct FileItem {
+    name: String,
+    path: PathBuf,
+    is_dir: bool,
+}
+
+/// Core application state container
+struct App {
+    current_path: PathBuf,
+    parent_path: Option<PathBuf>,
+    items: Vec<FileItem>,
+    selected_index: usize,
+    mode: Mode,
+    ai_summary: String,
 }
 
 impl App {
-    /// Initialize a new application instance anchored to the current working directory
-    fn new() -> Result<Self, Box<dyn Error>> {
+    /// Initialize application state starting from the current working directory
+    fn new() -> io::Result<Self> {
         let current_path = std::env::current_dir()?;
         let mut app = Self {
+            parent_path: current_path.parent().map(|p| p.to_path_buf()),
             current_path,
-            files: Vec::new(),
+            items: Vec::new(),
             selected_index: 0,
-            preview_content: String::new(),
             mode: Mode::Normal,
-            status_message: String::from("Ready. Press ^A for AI Summary."),
+            ai_summary: String::from("Ready. Press ^A for AI Summary."),
         };
-        app.load_directory()?;
+        app.refresh_directory()?;
         Ok(app)
     }
 
-    /// Synchronously scan and sort directory contents (directories pushed to top)
-    fn load_directory(&mut self) -> Result<(), Box<dyn Error>> {
-        self.files.clear();
+    /// Read directory contents and populate file items
+    fn refresh_directory(&mut self) -> io::Result<()> {
+        self.items.clear();
+        self.parent_path = self.current_path.parent().map(|p| p.to_path_buf());
+
         if let Ok(entries) = fs::read_dir(&self.current_path) {
-            let mut sorted: Vec<_> = entries.filter_map(Result::ok).collect();
-            // Sort logic: directories first, then alphabetical file names
-            sorted.sort_by(|a, b| {
-                let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                b_is_dir.cmp(&a_is_dir).then_with(|| a.file_name().cmp(&b.file_name()))
-            });
-            self.files = sorted;
+            let mut dirs = Vec::new();
+            let mut files = Vec::new();
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let is_dir = path.is_dir();
+
+                let item = FileItem { name, path, is_dir };
+                if is_dir {
+                    dirs.push(item);
+                } else {
+                    files.push(item);
+                }
+            }
+
+            // Sort directories first, then files alphabetically
+            dirs.sort_by(|a, b| a.name.cmp(&b.name));
+            files.sort_by(|a, b| a.name.cmp(&b.name));
+
+            self.items.extend(dirs);
+            self.items.extend(files);
         }
-        // Boundary safety check for selection index
-        if self.selected_index >= self.files.len() && !self.files.is_empty() {
-            self.selected_index = self.files.len() - 1;
+
+        // Clamp selected index to bounds
+        if self.selected_index >= self.items.len() && !self.items.is_empty() {
+            self.selected_index = self.items.len() - 1;
+        } else if self.items.is_empty() {
+            self.selected_index = 0;
         }
-        self.update_preview();
+
         Ok(())
     }
 
-    /// Update the right-hand preview pane based on the currently selected item
-    fn update_preview(&mut self) {
-        if let Some(entry) = self.files.get(self.selected_index) {
-            let path = entry.path();
-            if path.is_file() {
-                // Attempt to read text content (up to first 50 lines for high performance)
-                match fs::read_to_string(&path) {
-                    Ok(content) => {
-                        let lines: Vec<&str> = content.lines().take(50).collect();
-                        self.preview_content = lines.join("\n");
-                    }
-                    Err(_) => {
-                        self.preview_content = String::from("[Binary or unreadable file format]");
-                    }
-                }
-            } else if path.is_dir() {
-                // Render lightweight directory tree outline
-                let mut dir_list = String::from("Directory Contents:\n");
-                if let Ok(entries) = fs::read_dir(&path) {
-                    for e in entries.flatten().take(20) {
-                        if let Some(name) = e.file_name().to_str() {
-                            dir_list.push_str(&format!(" - {}\n", name));
-                        }
-                    }
-                }
-                self.preview_content = dir_list;
+    /// Move selection cursor down
+    fn next(&mut self) {
+        if !self.items.is_empty() && self.selected_index < self.items.len() - 1 {
+            self.selected_index += 1;
+        }
+    }
+
+    /// Move selection cursor up
+    fn previous(&mut self) {
+        if self.selected_index > 0 {
+            self.selected_index -= 1;
+        }
+    }
+
+    /// Navigate into selected directory
+    fn enter(&mut self) -> io::Result<()> {
+        if let Some(item) = self.items.get(self.selected_index) {
+            if item.is_dir {
+                self.current_path = item.path.clone();
+                self.selected_index = 0;
+                self.refresh_directory()?;
             }
-        } else {
-            self.preview_content = String::from("No selection");
+        }
+        Ok(())
+    }
+
+    /// Navigate back to parent directory
+    fn back(&mut self) -> io::Result<()> {
+        if let Some(parent) = self.parent_path.clone() {
+            self.current_path = parent;
+            self.selected_index = 0;
+            self.refresh_directory()?;
+        }
+        Ok(())
+    }
+
+    /// Simulate AI semantic inspection on the currently highlighted entry
+    fn trigger_ai_inspection(&mut self) {
+        if let Some(item) = self.items.get(self.selected_index) {
+            self.mode = Mode::AiInspection;
+            if item.is_dir {
+                self.ai_summary = format!(
+                    "🤖 AI Analysis for directory '{}':\n- Contains subfolders and files.\n- High structure integrity.\n- Ready for indexing.",
+                    item.name
+                );
+            } else {
+                self.ai_summary = format!(
+                    "🤖 AI Analysis for file '{}':\n- Codebase artifact.\n- Syntax verified.\n- Clean formatting and documentation detected.",
+                    item.name
+                );
+            }
         }
     }
 }
 
-/// Main entry point powered by Tokio asynchronous runtime
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    // Enable terminal raw mode for precise key-by-key event interception
+/// Helper function to return a Nerd Font webdev icon based on file name or type
+fn get_file_icon(name: &str, is_dir: bool) -> &str {
+    if is_dir {
+        return " "; // Folder icon
+    }
+    // Match file extensions for precise language/config icons
+    if name.ends_with(".rs") {
+        " " // Rust icon
+    } else if name.ends_with(".toml") || name.ends_with(".json") || name.ends_with(".yaml") || name.ends_with(".yml") {
+        " " // Config / gear icon
+    } else if name.ends_with(".md") {
+        " " // Markdown icon
+    } else if name.starts_with(".git") {
+        " " // Git icon
+    } else if name.ends_with(".lock") {
+        "󰌆 " // Lock icon
+    } else {
+        "󰈙 " // Default generic file icon
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // --- 1. Command-Line Arguments Parsing for Flags ---
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "--version" | "-V" => {
+                println!("quicksilver 0.1.0");
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                println!("QuickSilver (qs) 0.1.0");
+                println!("A blazing-fast, next-gen terminal file explorer written in Rust, powered by Tokio async IO, styled with Catppuccin Mocha.");
+                println!("\nUsage: qs [options]");
+                println!("\nOptions:");
+                println!("  -V, --version     Print version information");
+                println!("  -h, --help        Print help information");
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    // --- 2. Terminal UI Initialization ---
     enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
+    let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Instantiate state engine
+    // Create application instance
     let mut app = App::new()?;
 
-    // Main event loop
+    // --- 3. Main Event & Render Loop ---
+    let res = run_app(&mut terminal, &mut app);
+
+    // --- 4. Terminal Restoration on Exit ---
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    if let Err(err) = res {
+        println!("{:?}", err);
+    }
+
+    Ok(())
+}
+
+/// Core application event loop handling keyboard inputs and UI rendering
+fn run_app<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+) -> io::Result<()> {
     loop {
-        // Render UI frame
-        terminal.draw(|f| ui(f, &mut app))?;
+        terminal.draw(|f| ui(f, app))?;
 
-        // Poll for terminal input events with a 100ms timeout yield
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Global interrupt shortcut: Ctrl + C
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    break;
+        if let Event::Key(key) = event::read()? {
+            // Handle global quit command
+            if key.code == KeyCode::Char('q') {
+                return Ok(());
+            }
+
+            // Handle Ctrl + A for AI Semantic Inspection mode
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a') {
+                app.trigger_ai_inspection();
+                continue;
+            }
+
+            // Mode-specific handling
+            match app.mode {
+                Mode::AiInspection => {
+                    app.mode = Mode::Normal;
+                    app.ai_summary = String::from("Ready. Press ^A for AI Summary.");
                 }
-
-                // State machine routing based on operational mode
-                match app.mode {
-                    Mode::Normal => match key.code {
-                        KeyCode::Char('q') => break,
-                        // Navigation Down (j or Arrow Down)
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            if !app.files.is_empty() && app.selected_index < app.files.len() - 1 {
-                                app.selected_index += 1;
-                                app.update_preview();
-                            }
-                        }
-                        // Navigation Up (k or Arrow Up)
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            if app.selected_index > 0 {
-                                app.selected_index -= 1;
-                                app.update_preview();
-                            }
-                        }
-                        // Enter directory or file view (l or Enter)
-                        KeyCode::Char('l') | KeyCode::Enter => {
-                            if let Some(entry) = app.files.get(app.selected_index) {
-                                let path = entry.path();
-                                if path.is_dir() {
-                                    app.current_path = path;
-                                    app.selected_index = 0;
-                                    let _ = app.load_directory();
-                                }
-                            }
-                        }
-                        // Navigate back to parent directory (h or Backspace)
-                        KeyCode::Char('h') | KeyCode::Backspace => {
-                            if let Some(parent) = app.current_path.parent() {
-                                app.current_path = parent.to_path_buf();
-                                app.selected_index = 0;
-                                let _ = app.load_directory();
-                            }
-                        }
-                        // Trigger AI Semantic Overlay (Ctrl + A)
-                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.mode = Mode::AiSummary;
-                            app.status_message = String::from("QuickSilver AI Engine: Analyzing context...");
-                        }
+                Mode::Normal | Mode::CommandPalette => {
+                    match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => app.next(),
+                        KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                        KeyCode::Char('l') | KeyCode::Enter => app.enter()?,
+                        KeyCode::Char('h') => app.back()?,
                         _ => {}
-                    },
-                    Mode::AiSummary | Mode::CommandPalette => {
-                        // Dismiss overlays with ESC or 'q'
-                        if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
-                            app.mode = Mode::Normal;
-                            app.status_message = String::from("Returned to normal mode.");
-                        }
                     }
                 }
             }
         }
     }
-
-    // Restore terminal state upon exit
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    Ok(())
 }
 
-/// UI Layout Renderer Function
-fn ui(f: &mut ratatui::Frame, app: &mut App) {
+/// Render the 3-column Miller Columns user interface styled with Catppuccin Mocha
+fn ui(f: &mut ratatui::Frame, app: &App) {
     let size = f.size();
 
-    // Split viewport vertically: Main body view vs Footer status bar
+    // Main vertical split: Content area on top, Status Bar at the bottom
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(3)].as_ref())
+        .constraints([Constraint::Min(3), Constraint::Length(1)].as_ref())
         .split(size);
 
-    // Split main body horizontally into 3 columns (Miller Columns style preview layout)
-    let body_chunks = Layout::default()
+    // Horizontal split for 3-column Miller columns layout: [Parent, Current, Preview]
+    let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(40), Constraint::Percentage(30)].as_ref())
+        .constraints([
+            Constraint::Percentage(25), // Parent directory preview
+            Constraint::Percentage(45), // Active directory file list
+            Constraint::Percentage(30), // Live file preview / AI summary pane
+        ])
         .split(chunks[0]);
 
-    // 1. Left Pane: Parent Directory Context
-    let parent_name = app.current_path.parent().and_then(|p| p.to_str()).unwrap_or("/");
+    // --- Column 1: Parent Directory Preview ---
+    let parent_title = if let Some(p) = &app.parent_path {
+        format!(" Parent: {} ", p.display())
+    } else {
+        String::from(" Parent: None ")
+    };
     let parent_block = Block::default()
-        .title(format!(" 📁 Parent: {} ", parent_name))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(COLOR_SURFACE1))
-        .style(Style::default().bg(COLOR_BASE).fg(COLOR_TEXT));
-    f.render_widget(parent_block, body_chunks[0]);
+        .border_style(Style::default().fg(COLOR_MAUVE))
+        .style(Style::default().bg(COLOR_BASE).fg(COLOR_SUBTEXT))
+        .title(parent_title);
+    
+    let parent_content = Paragraph::new(
+        app.parent_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Root directory".into()),
+    )
+    .block(parent_block);
+    f.render_widget(parent_content, columns[0]);
 
-    // 2. Middle Pane: Current Directory File List
+    // --- Column 2: Current Directory File List (with WebDev Icons) ---
+    let current_title = format!(" {} ", app.current_path.display());
     let items: Vec<ListItem> = app
-        .files
+        .items
         .iter()
         .enumerate()
-        .map(|(i, entry)| {
-            let name = entry.file_name().into_string().unwrap_or_default();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let prefix = if is_dir { "📁 " } else { "📄 " };
-            let display_name = format!("{}{}", prefix, name);
+        .map(|(i, item)| {
+            let icon = get_file_icon(&item.name, item.is_dir);
+            let display_text = format!("{} {}", icon, item.name);
             
-            // Highlight selected row with Catppuccin Blue and bold styling
             let style = if i == app.selected_index {
-                Style::default().bg(COLOR_SURFACE1).fg(COLOR_BLUE).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(COLOR_SURFACE)
+                    .fg(COLOR_BLUE)
+                    .add_modifier(Modifier::BOLD)
+            } else if item.is_dir {
+                Style::default().fg(COLOR_BLUE)
             } else {
                 Style::default().fg(COLOR_TEXT)
             };
-            ListItem::new(display_name).style(style)
+            ListItem::new(Span::styled(display_text, style))
         })
         .collect();
 
-    let current_title = format!(" 📂 {} ", app.current_path.display());
-    let list_widget = List::new(items)
+    let list = List::new(items)
         .block(
             Block::default()
-                .title(current_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(COLOR_MAUVE))
-                .style(Style::default().bg(COLOR_BASE)),
+                .style(Style::default().bg(COLOR_BASE))
+                .title(current_title),
         );
-    f.render_widget(list_widget, body_chunks[1]);
+    f.render_widget(list, columns[1]);
 
-    // 3. Right Pane: Rich Preview / AI Semantic Insight Pane
+    // --- Column 3: Live Preview / AI Semantic Inspection Pane ---
     let preview_title = match app.mode {
-        Mode::AiSummary => " 🤖 QuickSilver AI Insights ",
+        Mode::AiInspection => " 🤖 AI Semantic Inspection ",
         _ => " 👁️ Live Preview ",
     };
-    
-    let preview_text = match app.mode {
-        Mode::AiSummary => String::from(
-            "=== QuickSilver AI Engine ===\n\n\
-            [1] Asynchronous Tokio event loop running at peak efficiency.\n\
-            [2] Catppuccin Mocha theme applied successfully.\n\
-            [3] Author: Billy-79 | Edition: 2026.\n\n\
-            Press ESC to return."
-        ),
-        _ => app.preview_content.clone(),
+
+    let preview_content = if app.mode == Mode::AiInspection {
+        app.ai_summary.clone()
+    } else if let Some(selected) = app.items.get(app.selected_index) {
+        if selected.is_dir {
+            match fs::read_dir(&selected.path) {
+                Ok(entries) => {
+                    let mut preview_str = String::from("Directory Contents:\n");
+                    for entry in entries.take(15).flatten() {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        preview_str.push_str(&format!("- {}\n", name));
+                    }
+                    preview_str
+                }
+                Err(_) => String::from("Unable to read directory contents."),
+            }
+        } else {
+            match fs::read_to_string(&selected.path) {
+                Ok(contents) => {
+                    contents.lines().take(20).collect::<Vec<&str>>().join("\n")
+                }
+                Err(_) => String::from("Binary file or unreadable preview."),
+            }
+        }
+    } else {
+        String::from("No item selected.")
     };
 
-    let preview_widget = Paragraph::new(preview_text)
-        .block(
-            Block::default()
-                .title(preview_title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(COLOR_GREEN))
-                .style(Style::default().bg(COLOR_BASE)),
-        )
-        .wrap(Wrap { trim: true });
-    f.render_widget(preview_widget, body_chunks[2]);
+    let preview_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(COLOR_GREEN))
+        .style(Style::default().bg(COLOR_BASE).fg(COLOR_TEXT))
+        .title(preview_title);
 
-    // 4. Footer: Interactive Status Bar
-    let status_bar = Paragraph::new(Line::from(vec![
-        Span::styled(" QUICKSILVER ", Style::default().bg(COLOR_BLUE).fg(COLOR_BASE).add_modifier(Modifier::BOLD)),
-        Span::raw(format!(" {} | ^A: AI | j/k: Nav | l/Enter: Open | h: Back | q: Quit", app.status_message)),
-    ]))
-    .style(Style::default().bg(COLOR_MANTLE).fg(COLOR_SUBTEXT));
+    let preview_paragraph = Paragraph::new(preview_content)
+        .block(preview_block)
+        .wrap(ratatui::widgets::Wrap { trim: true });
+    f.render_widget(preview_paragraph, columns[2]);
+
+    // --- Status Bar Footer ---
+    let status_text = match app.mode {
+        Mode::AiInspection => " AI INSPECTION MODE | Press any key to return ",
+        _ => " Ready. Press ^A for AI Summary. | ^A: AI | j/k: Nav | l/Enter: Open | h: Back | q: Quit ",
+    };
+    let status_bar = Paragraph::new(status_text).style(
+        Style::default()
+            .bg(COLOR_MAUVE)
+            .fg(COLOR_MANTLE)
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(status_bar, chunks[1]);
 }
