@@ -5,7 +5,7 @@
  * Description:  A blazing-fast, next-gen terminal file explorer written in Rust,
  *               powered by Ratatui & Crossterm, styled with Catppuccin Mocha,
  *               featuring 3-column Miller layout, Nerd Font icons, AI inspection,
- *               dotfile configuration support, and an interactive Command Palette.
+ *               dotfile configuration support, and direct keyboard shortcuts.
  * ============================================================================
  */
 
@@ -102,7 +102,6 @@ impl Config {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,         // Standard file navigation and preview mode
-    CommandPalette, // Interactive command palette mode (triggered by ':')
     AiInspection,   // Ctrl+A semantic AI code/file inspection mode
 }
 
@@ -113,7 +112,7 @@ struct FileItem {
     is_dir: bool,
 }
 
-/// Central application state container holding paths, items, selections, config, and command input buffer
+/// Central application state container holding paths, items, selections, and config
 struct App {
     current_path: PathBuf,
     parent_path: Option<PathBuf>,
@@ -122,7 +121,6 @@ struct App {
     mode: Mode,
     ai_summary: String,
     config: Config,
-    input_buffer: String,
 }
 
 impl App {
@@ -136,9 +134,8 @@ impl App {
             items: Vec::new(),
             selected_index: 0,
             mode: Mode::Normal,
-            ai_summary: String::from("Ready. Press ^A for AI Summary, ':' for Commands."),
+            ai_summary: String::from("Ready. Press ^A for AI Summary, '?' for Help."),
             config,
-            input_buffer: String::new(),
         };
         app.refresh_directory()?;
         Ok(app)
@@ -247,52 +244,20 @@ impl App {
         }
     }
 
-    /// Parses and executes commands entered in the Command Palette
-    fn execute_command(&mut self) -> io::Result<()> {
-        let cmd = self.input_buffer.trim().to_lowercase();
-        match cmd.as_str() {
-            "toggle hidden" => {
-                self.config.show_hidden = !self.config.show_hidden;
-                self.refresh_directory()?;
-                self.ai_summary = format!("⚙️ Config updated: show_hidden = {}", self.config.show_hidden);
-            }
-            "toggle icons" => {
-                self.config.icons_enabled = !self.config.icons_enabled;
-                self.ai_summary = format!("⚙️ Config updated: icons_enabled = {}", self.config.icons_enabled);
-            }
-            "reload config" => {
-                self.config = Config::load();
-                self.refresh_directory()?;
-                self.ai_summary = String::from("⚙️ Configuration reloaded from ~/.config/qs/config.toml");
-            }
-            "home" => {
-                if let Ok(home) = std::env::var("HOME") {
-                    self.current_path = PathBuf::from(home);
-                    self.selected_index = 0;
-                    self.refresh_directory()?;
-                }
-            }
-            "ai" | "inspect" => {
-                self.trigger_ai_inspection();
-            }
-            "help" => {
-                self.ai_summary = String::from(
-                    "📖 QuickSilver Command Palette Help:\n\
-                    - toggle hidden: Show or hide dotfiles\n\
-                    - toggle icons: Enable or disable Nerd Font icons\n\
-                    - reload config: Re-read config.toml live\n\
-                    - home: Jump to user home directory\n\
-                    - ai: Run semantic AI inspection on selection\n\
-                    - help: Display this command reference"
-                );
-                self.mode = Mode::AiInspection;
-            }
-            _ => {
-                self.ai_summary = format!("❌ Unknown command: '{}'. Type 'help' for available commands.", cmd);
-                self.mode = Mode::AiInspection;
-            }
-        }
-        Ok(())
+    /// Displays shortcut key reference in the inspection pane
+    fn show_help(&mut self) {
+        self.mode = Mode::AiInspection;
+        self.ai_summary = String::from(
+            "📖 QuickSilver Direct Keybindings:\n\
+            - .        : Toggle show/hide dotfiles\n\
+            - i        : Toggle Nerd Font icons\n\
+            - r        : Reload ~/.config/qs/config.toml\n\
+            - ~ or g   : Jump to Home directory\n\
+            - ^A       : AI Semantic Inspection\n\
+            - j/k/h/l  : Vim Navigation\n\
+            - ?        : Show this Help overlay\n\
+            - q        : Quit QuickSilver"
+        );
     }
 }
 
@@ -372,9 +337,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ============================================================================
-/******************************************************************************
- * EVENT LOOP & INPUT ROUTING
- ******************************************************************************/
+// EVENT LOOP & INPUT ROUTING
+// ============================================================================
+
 /// Core event loop managing terminal redraws and keyboard inputs across modes
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
@@ -384,10 +349,10 @@ fn run_app<B: ratatui::backend::Backend>(
         // Draw the user interface on each tick
         terminal.draw(|f| ui(f, app))?;
 
-        // Read incoming terminal events (blocking until input occurs)
+        // Read incoming terminal events
         if let Event::Key(key) = event::read()? {
             // Global quit shortcut
-            if key.code == KeyCode::Char('q') && app.mode != Mode::CommandPalette {
+            if key.code == KeyCode::Char('q') {
                 return Ok(());
             }
 
@@ -400,37 +365,32 @@ fn run_app<B: ratatui::backend::Backend>(
             // Mode-specific input routing
             match app.mode {
                 Mode::AiInspection => {
-                    // Any key press exits AI inspection mode and returns to normal view
+                    // Any key press exits AI inspection / Help mode and returns to normal view
                     app.mode = Mode::Normal;
-                    app.ai_summary = String::from("Ready. Press ^A for AI Summary, ':' for Commands.");
-                }
-                Mode::CommandPalette => {
-                    match key.code {
-                        KeyCode::Esc => {
-                            app.mode = Mode::Normal;
-                            app.input_buffer.clear();
-                        }
-                        KeyCode::Enter => {
-                            app.execute_command()?;
-                            if app.mode == Mode::CommandPalette {
-                                app.mode = Mode::Normal;
-                            }
-                            app.input_buffer.clear();
-                        }
-                        KeyCode::Backspace => {
-                            app.input_buffer.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            app.input_buffer.push(c);
-                        }
-                        _ => {}
-                    }
+                    app.ai_summary = String::from("Ready. Press ^A for AI Summary, '?' for Help.");
                 }
                 Mode::Normal => {
                     match key.code {
-                        KeyCode::Char(':') => {
-                            app.mode = Mode::CommandPalette;
-                            app.input_buffer.clear();
+                        KeyCode::Char('.') => {
+                            app.config.show_hidden = !app.config.show_hidden;
+                            app.refresh_directory()?;
+                        }
+                        KeyCode::Char('i') => {
+                            app.config.icons_enabled = !app.config.icons_enabled;
+                        }
+                        KeyCode::Char('r') => {
+                            app.config = Config::load();
+                            app.refresh_directory()?;
+                        }
+                        KeyCode::Char('~') | KeyCode::Char('g') => {
+                            if let Ok(home) = std::env::var("HOME") {
+                                app.current_path = PathBuf::from(home);
+                                app.selected_index = 0;
+                                app.refresh_directory()?;
+                            }
+                        }
+                        KeyCode::Char('?') => {
+                            app.show_help();
                         }
                         KeyCode::Char('j') | KeyCode::Down => app.next(),
                         KeyCode::Char('k') | KeyCode::Up => app.previous(),
@@ -534,7 +494,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
 
     // --- Column 3: Live Preview / AI Semantic Inspection Pane ---
     let preview_title = match app.mode {
-        Mode::AiInspection => " 🤖 AI Semantic Inspection ",
+        Mode::AiInspection => " 🤖 AI / Shortcut Reference ",
         _ => " 👁️ Live Preview ",
     };
 
@@ -576,11 +536,10 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         .wrap(ratatui::widgets::Wrap { trim: true });
     f.render_widget(preview_paragraph, columns[2]);
 
-    // --- Status Bar Footer (Dynamic based on mode) ---
+    // --- Status Bar Footer ---
     let status_text = match app.mode {
-        Mode::AiInspection => String::from(" AI INSPECTION MODE | Press any key to return "),
-        Mode::CommandPalette => format!(":{}█", app.input_buffer),
-        Mode::Normal => String::from(" Ready. | ^A: AI | :: Command Palette | j/k: Nav | l: Open | h: Back | q: Quit "),
+        Mode::AiInspection => " Press any key to return ",
+        _ => " Ready. | ^A: AI | .: Dotfiles | i: Icons | r: Reload | ~: Home | ?: Help | q: Quit ",
     };
 
     let status_bar = Paragraph::new(status_text).style(
