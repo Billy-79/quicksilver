@@ -4,7 +4,8 @@
  * Author:       Billy-79
  * Description:  A blazing-fast, next-gen terminal file explorer written in Rust,
  *               powered by Ratatui & Crossterm, styled with Catppuccin Mocha,
- *               featuring 3-column Miller layout, Nerd Font icons, and AI inspection.
+ *               featuring 3-column Miller layout, Nerd Font icons, AI inspection,
+ *               and dotfile configuration support (`config.toml`).
  * ============================================================================
  */
 
@@ -21,6 +22,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self},
@@ -36,6 +38,50 @@ const COLOR_MAUVE: Color = Color::Rgb(203, 166, 247);    // #cba6f7 - Accents & 
 const COLOR_BLUE: Color = Color::Rgb(137, 180, 250);     // #89b4fa - Highlights & directories
 const COLOR_GREEN: Color = Color::Rgb(166, 227, 161);    // #a6e3a1 - Success indicators & icons
 const COLOR_SURFACE: Color = Color::Rgb(49, 50, 68);     // #313244 - Selection background
+
+// --- Configuration Structs ---
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Config {
+    #[serde(default = "default_show_hidden")]
+    pub show_hidden: bool,
+    #[serde(default = "default_transparency")]
+    pub transparency: bool,
+    #[serde(default = "default_icons_enabled")]
+    pub icons_enabled: bool,
+}
+
+fn default_show_hidden() -> bool { false }
+fn default_transparency() -> bool { false }
+fn default_icons_enabled() -> bool { true }
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            show_hidden: false,
+            transparency: false,
+            icons_enabled: true,
+        }
+    }
+}
+
+impl Config {
+    /// Load configuration from ~/.config/qs/config.toml or fallback to defaults
+    fn load() -> Self {
+        let config_path = std::env::var("HOME")
+            .map(|home| PathBuf::from(home).join(".config/qs/config.toml"))
+            .unwrap_or_else(|_| PathBuf::from("config.toml"));
+
+        if config_path.exists() {
+            if let Ok(contents) = fs::read_to_string(&config_path) {
+                if let Ok(config) = toml::from_str(&contents) {
+                    return config;
+                }
+            }
+        }
+        
+        Self::default()
+    }
+}
 
 /// Application operational modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +107,14 @@ struct App {
     selected_index: usize,
     mode: Mode,
     ai_summary: String,
+    config: Config,
 }
 
 impl App {
-    /// Initialize application state starting from the current working directory
+    /// Initialize application state starting from the current working directory and loading config
     fn new() -> io::Result<Self> {
         let current_path = std::env::current_dir()?;
+        let config = Config::load();
         let mut app = Self {
             parent_path: current_path.parent().map(|p| p.to_path_buf()),
             current_path,
@@ -74,12 +122,13 @@ impl App {
             selected_index: 0,
             mode: Mode::Normal,
             ai_summary: String::from("Ready. Press ^A for AI Summary."),
+            config,
         };
         app.refresh_directory()?;
         Ok(app)
     }
 
-    /// Read directory contents and populate file items
+    /// Read directory contents and populate file items respecting config settings
     fn refresh_directory(&mut self) -> io::Result<()> {
         self.items.clear();
         self.parent_path = self.current_path.parent().map(|p| p.to_path_buf());
@@ -95,8 +144,13 @@ impl App {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                let is_dir = path.is_dir();
+                
+                // Respect show_hidden configuration setting
+                if !self.config.show_hidden && name.starts_with('.') {
+                    continue;
+                }
 
+                let is_dir = path.is_dir();
                 let item = FileItem { name, path, is_dir };
                 if is_dir {
                     dirs.push(item);
@@ -183,7 +237,6 @@ fn get_file_icon(name: &str, is_dir: bool) -> &str {
     if is_dir {
         return " "; // Folder icon
     }
-    // Match file extensions for precise language/config icons
     if name.ends_with(".rs") {
         " " // Rust icon
     } else if name.ends_with(".toml") || name.ends_with(".json") || name.ends_with(".yaml") || name.ends_with(".yml") {
@@ -255,18 +308,15 @@ fn run_app<B: ratatui::backend::Backend>(
         terminal.draw(|f| ui(f, app))?;
 
         if let Event::Key(key) = event::read()? {
-            // Handle global quit command
             if key.code == KeyCode::Char('q') {
                 return Ok(());
             }
 
-            // Handle Ctrl + A for AI Semantic Inspection mode
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a') {
                 app.trigger_ai_inspection();
                 continue;
             }
 
-            // Mode-specific handling
             match app.mode {
                 Mode::AiInspection => {
                     app.mode = Mode::Normal;
@@ -286,17 +336,22 @@ fn run_app<B: ratatui::backend::Backend>(
     }
 }
 
-/// Render the 3-column Miller Columns user interface styled with Catppuccin Mocha
+/// Render the 3-column Miller Columns user interface styled with Catppuccin Mocha & config support
 fn ui(f: &mut ratatui::Frame, app: &App) {
     let size = f.size();
 
-    // Main vertical split: Content area on top, Status Bar at the bottom
+    // Determine background color based on transparency setting
+    let bg_color = if app.config.transparency {
+        Color::Reset
+    } else {
+        COLOR_BASE
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)].as_ref())
         .split(size);
 
-    // Horizontal split for 3-column Miller columns layout: [Parent, Current, Preview]
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -315,7 +370,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     let parent_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(COLOR_MAUVE))
-        .style(Style::default().bg(COLOR_BASE).fg(COLOR_SUBTEXT))
+        .style(Style::default().bg(bg_color).fg(COLOR_SUBTEXT))
         .title(parent_title);
     
     let parent_content = Paragraph::new(
@@ -327,15 +382,19 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     .block(parent_block);
     f.render_widget(parent_content, columns[0]);
 
-    // --- Column 2: Current Directory File List (with WebDev Icons) ---
+    // --- Column 2: Current Directory File List ---
     let current_title = format!(" {} ", app.current_path.display());
     let items: Vec<ListItem> = app
         .items
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let icon = get_file_icon(&item.name, item.is_dir);
-            let display_text = format!("{} {}", icon, item.name);
+            let display_text = if app.config.icons_enabled {
+                let icon = get_file_icon(&item.name, item.is_dir);
+                format!("{} {}", icon, item.name)
+            } else {
+                item.name.clone()
+            };
             
             let style = if i == app.selected_index {
                 Style::default()
@@ -356,7 +415,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(COLOR_MAUVE))
-                .style(Style::default().bg(COLOR_BASE))
+                .style(Style::default().bg(bg_color))
                 .title(current_title),
         );
     f.render_widget(list, columns[1]);
@@ -397,7 +456,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     let preview_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(COLOR_GREEN))
-        .style(Style::default().bg(COLOR_BASE).fg(COLOR_TEXT))
+        .style(Style::default().bg(bg_color).fg(COLOR_TEXT))
         .title(preview_title);
 
     let preview_paragraph = Paragraph::new(preview_content)
