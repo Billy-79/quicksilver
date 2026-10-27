@@ -57,22 +57,18 @@ const COLOR_SURFACE: Color = Color::Rgb(49, 50, 68);     // #313244 - Selection 
 pub struct Config {
     #[serde(default = "default_show_hidden")]
     pub show_hidden: bool,
-    #[serde(default = "default_transparency")]
-    pub transparency: bool,
     #[serde(default = "default_icons_enabled")]
     pub icons_enabled: bool,
 }
 
 // Default fallback generator functions for serde attributes
 fn default_show_hidden() -> bool { false }
-fn default_transparency() -> bool { false }
 fn default_icons_enabled() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             show_hidden: false,
-            transparency: false,
             icons_enabled: true,
         }
     }
@@ -377,16 +373,12 @@ fn run_app<B: ratatui::backend::Backend>(
 // USER INTERFACE RENDERING ENGINE
 // ============================================================================
 
-/// Renders the 3-column Miller Columns layout styled with Catppuccin Mocha & config support
+/// Renders the 3-column Miller Columns layout styled with Catppuccin Mocha
 fn ui(f: &mut ratatui::Frame, app: &App) {
     let size = f.size();
 
-    // Determine background color based on transparency setting (`Color::Reset` respects terminal emulator opacity)
-    let bg_color = if app.config.transparency {
-        Color::Reset
-    } else {
-        COLOR_BASE
-    };
+    // Use solid Catppuccin Mocha base background color
+    let bg_color = COLOR_BASE;
 
     // Split terminal screen vertically: Main content area on top, status bar at the bottom
     let chunks = Layout::default()
@@ -511,11 +503,8 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
 
     // --- Status Bar Footer ---
     let status_text = match app.mode {
-        Mode::AiInspection => String::from(" AI INSPECTION MODE | Press any key to return "),
-        _ => format!(
-            " Config [Hidden: {} | Trans: {} | Icons: {}] | ^A: AI | j/k: Nav | l: Open | h: Back | q: Quit ",
-            app.config.show_hidden, app.config.transparency, app.config.icons_enabled
-        ),
+        Mode::AiInspection => " AI INSPECTION MODE | Press any key to return ",
+        _ => " Ready. Press ^A for AI Summary. | ^A: AI | j/k: Nav | l/Enter: Open | h: Back | q: Quit ",
     };
     let status_bar = Paragraph::new(status_text).style(
         Style::default()
