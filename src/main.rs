@@ -9,11 +9,14 @@
  * ============================================================================
  */
 
+// Import necessary crossterm modules for terminal manipulation and event handling
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+
+// Import ratatui widgets, layouts, styles, and backend definitions for the TUI
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -22,14 +25,20 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
+
+// Import serde serialization/deserialization traits for parsing config files
 use serde::{Deserialize, Serialize};
+
+// Import standard library utilities for filesystem access and input/output
 use std::{
     fs,
     io::{self},
     path::PathBuf,
 };
 
-// --- Catppuccin Mocha Color Palette Constants ---
+// ============================================================================
+// CATPPUCCIN MOCHA COLOR PALETTE CONSTANTS
+// ============================================================================
 const COLOR_BASE: Color = Color::Rgb(30, 30, 46);       // #1e1e2e - Main background
 const COLOR_MANTLE: Color = Color::Rgb(24, 24, 37);     // #181825 - Deeper panel background
 const COLOR_TEXT: Color = Color::Rgb(205, 214, 244);     // #cdd6f4 - Primary text
@@ -39,7 +48,11 @@ const COLOR_BLUE: Color = Color::Rgb(137, 180, 250);     // #89b4fa - Highlights
 const COLOR_GREEN: Color = Color::Rgb(166, 227, 161);    // #a6e3a1 - Success indicators & icons
 const COLOR_SURFACE: Color = Color::Rgb(49, 50, 68);     // #313244 - Selection background
 
-// --- Configuration Structs ---
+// ============================================================================
+// CONFIGURATION STRUCTS & DEFAULTS
+// ============================================================================
+
+/// Represents persistent user settings loaded from `~/.config/qs/config.toml`
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
     #[serde(default = "default_show_hidden")]
@@ -50,6 +63,7 @@ pub struct Config {
     pub icons_enabled: bool,
 }
 
+// Default fallback generator functions for serde attributes
 fn default_show_hidden() -> bool { false }
 fn default_transparency() -> bool { false }
 fn default_icons_enabled() -> bool { true }
@@ -65,7 +79,8 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from ~/.config/qs/config.toml or fallback to defaults
+    /// Attempts to load configuration from `~/.config/qs/config.toml`.
+    /// Falls back to default values if the file is missing or malformed.
     fn load() -> Self {
         let config_path = std::env::var("HOME")
             .map(|home| PathBuf::from(home).join(".config/qs/config.toml"))
@@ -83,7 +98,11 @@ impl Config {
     }
 }
 
-/// Application operational modes
+// ============================================================================
+// APPLICATION STATE & DATA STRUCTURES
+// ============================================================================
+
+/// Defines the operational state/mode of the file explorer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum Mode {
@@ -92,14 +111,14 @@ enum Mode {
     AiInspection,   // Ctrl+A semantic AI code/file inspection mode
 }
 
-/// Represents a single file or directory entry in the filesystem
+/// Metadata structure representing an individual file or folder entry
 struct FileItem {
     name: String,
     path: PathBuf,
     is_dir: bool,
 }
 
-/// Core application state container
+/// Central application state container holding paths, items, selections, and configuration
 struct App {
     current_path: PathBuf,
     parent_path: Option<PathBuf>,
@@ -111,7 +130,7 @@ struct App {
 }
 
 impl App {
-    /// Initialize application state starting from the current working directory and loading config
+    /// Initializes application state starting in the current working directory and loading dotfile configuration
     fn new() -> io::Result<Self> {
         let current_path = std::env::current_dir()?;
         let config = Config::load();
@@ -128,7 +147,7 @@ impl App {
         Ok(app)
     }
 
-    /// Read directory contents and populate file items respecting config settings
+    /// Reads directory contents, filters hidden files based on configuration, and sorts entries alphabetically (directories first)
     fn refresh_directory(&mut self) -> io::Result<()> {
         self.items.clear();
         self.parent_path = self.current_path.parent().map(|p| p.to_path_buf());
@@ -145,7 +164,7 @@ impl App {
                     .to_string_lossy()
                     .into_owned();
                 
-                // Respect show_hidden configuration setting
+                // Filter out dotfiles if `show_hidden` is disabled in config
                 if !self.config.show_hidden && name.starts_with('.') {
                     continue;
                 }
@@ -159,7 +178,7 @@ impl App {
                 }
             }
 
-            // Sort directories first, then files alphabetically
+            // Sort directories and files alphabetically
             dirs.sort_by(|a, b| a.name.cmp(&b.name));
             files.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -167,7 +186,7 @@ impl App {
             self.items.extend(files);
         }
 
-        // Clamp selected index to bounds
+        // Ensure selected index stays within valid array bounds
         if self.selected_index >= self.items.len() && !self.items.is_empty() {
             self.selected_index = self.items.len() - 1;
         } else if self.items.is_empty() {
@@ -177,21 +196,21 @@ impl App {
         Ok(())
     }
 
-    /// Move selection cursor down
+    /// Moves the selection cursor down to the next list item
     fn next(&mut self) {
         if !self.items.is_empty() && self.selected_index < self.items.len() - 1 {
             self.selected_index += 1;
         }
     }
 
-    /// Move selection cursor up
+    /// Moves the selection cursor up to the previous list item
     fn previous(&mut self) {
         if self.selected_index > 0 {
             self.selected_index -= 1;
         }
     }
 
-    /// Navigate into selected directory
+    /// Navigates into the currently selected directory
     fn enter(&mut self) -> io::Result<()> {
         if let Some(item) = self.items.get(self.selected_index) {
             if item.is_dir {
@@ -203,7 +222,7 @@ impl App {
         Ok(())
     }
 
-    /// Navigate back to parent directory
+    /// Navigates back up to the parent directory
     fn back(&mut self) -> io::Result<()> {
         if let Some(parent) = self.parent_path.clone() {
             self.current_path = parent;
@@ -213,7 +232,7 @@ impl App {
         Ok(())
     }
 
-    /// Simulate AI semantic inspection on the currently highlighted entry
+    /// Triggers simulated AI semantic inspection on the currently highlighted file or folder
     fn trigger_ai_inspection(&mut self) {
         if let Some(item) = self.items.get(self.selected_index) {
             self.mode = Mode::AiInspection;
@@ -232,7 +251,11 @@ impl App {
     }
 }
 
-/// Helper function to return a Nerd Font webdev icon based on file name or type
+// ============================================================================
+// ICON HELPER FUNCTIONS
+// ============================================================================
+
+/// Returns appropriate Nerd Font webdev icons based on file extension, name, or type
 fn get_file_icon(name: &str, is_dir: bool) -> &str {
     if is_dir {
         return " "; // Folder icon
@@ -251,6 +274,10 @@ fn get_file_icon(name: &str, is_dir: bool) -> &str {
         "󰈙 " // Default generic file icon
     }
 }
+
+// ============================================================================
+// MAIN ENTRY POINT & CLI FLAG HANDLING
+// ============================================================================
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 1. Command-Line Arguments Parsing for Flags ---
@@ -281,7 +308,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create application instance
+    // Instantiate core application state
     let mut app = App::new()?;
 
     // --- 3. Main Event & Render Loop ---
@@ -299,26 +326,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Core application event loop handling keyboard inputs and UI rendering
+// ============================================================================
+// EVENT LOOP & INPUT ROUTING
+// ============================================================================
+
+/// Core event loop managing terminal redraws and keyboard inputs
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> io::Result<()> {
     loop {
+        // Draw the user interface on each tick
         terminal.draw(|f| ui(f, app))?;
 
+        // Read incoming terminal events (blocking until input occurs)
         if let Event::Key(key) = event::read()? {
+            // Global quit shortcut
             if key.code == KeyCode::Char('q') {
                 return Ok(());
             }
 
+            // Ctrl + A shortcut for AI Semantic Inspection
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a') {
                 app.trigger_ai_inspection();
                 continue;
             }
 
+            // Mode-specific input routing
             match app.mode {
                 Mode::AiInspection => {
+                    // Any key press exits AI inspection mode and returns to normal view
                     app.mode = Mode::Normal;
                     app.ai_summary = String::from("Ready. Press ^A for AI Summary.");
                 }
@@ -336,28 +373,34 @@ fn run_app<B: ratatui::backend::Backend>(
     }
 }
 
-/// Render the 3-column Miller Columns user interface styled with Catppuccin Mocha & config support
+// ============================================================================
+// USER INTERFACE RENDERING ENGINE
+// ============================================================================
+
+/// Renders the 3-column Miller Columns layout styled with Catppuccin Mocha & config support
 fn ui(f: &mut ratatui::Frame, app: &App) {
     let size = f.size();
 
-    // Determine background color based on transparency setting
+    // Determine background color based on transparency setting (`Color::Reset` respects terminal emulator opacity)
     let bg_color = if app.config.transparency {
         Color::Reset
     } else {
         COLOR_BASE
     };
 
+    // Split terminal screen vertically: Main content area on top, status bar at the bottom
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)].as_ref())
         .split(size);
 
+    // Split content area horizontally into 3 Miller Columns: [Parent Preview, Active Directory, Live Preview / AI]
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(25), // Parent directory preview
-            Constraint::Percentage(45), // Active directory file list
-            Constraint::Percentage(30), // Live file preview / AI summary pane
+            Constraint::Percentage(25), // Column 1: Parent directory preview
+            Constraint::Percentage(45), // Column 2: Active directory file list
+            Constraint::Percentage(30), // Column 3: Live file preview / AI inspection
         ])
         .split(chunks[0]);
 
@@ -389,6 +432,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, item)| {
+            // Conditionally prepend Nerd Font icons based on configuration
             let display_text = if app.config.icons_enabled {
                 let icon = get_file_icon(&item.name, item.is_dir);
                 format!("{} {}", icon, item.name)
@@ -396,6 +440,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
                 item.name.clone()
             };
             
+            // Highlight selected index and colorize directories vs. files
             let style = if i == app.selected_index {
                 Style::default()
                     .bg(COLOR_SURFACE)
@@ -466,8 +511,11 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
 
     // --- Status Bar Footer ---
     let status_text = match app.mode {
-        Mode::AiInspection => " AI INSPECTION MODE | Press any key to return ",
-        _ => " Ready. Press ^A for AI Summary. | ^A: AI | j/k: Nav | l/Enter: Open | h: Back | q: Quit ",
+        Mode::AiInspection => String::from(" AI INSPECTION MODE | Press any key to return "),
+        _ => format!(
+            " Config [Hidden: {} | Trans: {} | Icons: {}] | ^A: AI | j/k: Nav | l: Open | h: Back | q: Quit ",
+            app.config.show_hidden, app.config.transparency, app.config.icons_enabled
+        ),
     };
     let status_bar = Paragraph::new(status_text).style(
         Style::default()
