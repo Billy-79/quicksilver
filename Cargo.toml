@@ -4,14 +4,19 @@ version = "0.2.0"
 edition = "2021"
 authors = ["Billy-79"]
 
+# Define the primary binary target
 [[bin]]
 name = "qs"
 path = "src/main.rs"
 
 [dependencies]
+# Terminal UI framework
 ratatui = "0.26.3"
+# Cross-platform terminal manipulation backend
 crossterm = "0.27.0"
-serde = { version = "1.0", features = ["derive"] }
-dirs = "5.0"
-toml = "0.8"
-syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+# Converts ANSI escape byte streams from bat into Ratatui Text widgets
+ansi-to-tui = "4.0"
+# Image processing engine matching ratatui-image 1.0.5 dependencies
+image = "0.25"
+# Terminal graphic protocol encoder supporting Kitty, Sixel, and half-blocks
+ratatui-image = "1.0"
