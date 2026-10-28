@@ -4,15 +4,14 @@
  * Author:       Billy-79
  * Description:  A blazing-fast, next-gen terminal file explorer written in Rust,
  *               powered by Ratatui & Crossterm, styled with Catppuccin Mocha,
- *               featuring 3-column Miller layout, Nerd Font icons, AI inspection,
- *               dotfile configuration support, direct keyboard shortcuts, and
- *               live syntax-highlighted code previews.
+ *               featuring Yazi-inspired columns, cached elite syntect highlighting,
+ *               mouse scroll support, and arrow/Vim navigation mapping.
  * ============================================================================
  */
 
 // Import necessary crossterm modules for terminal manipulation and event handling
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -30,11 +29,20 @@ use ratatui::{
 // Import serde serialization/deserialization traits for parsing config files
 use serde::{Deserialize, Serialize};
 
-// Import standard library utilities for filesystem access and input/output
+// Import syntect modules for advanced grammar-based syntax highlighting
+use syntect::{
+    easy::HighlightLines,
+    highlighting::ThemeSet,
+    parsing::SyntaxSet,
+    util::LinesWithEndings,
+};
+
+// Import standard library utilities for filesystem access, input/output, and caching
 use std::{
     fs,
     io::{self},
     path::PathBuf,
+    sync::OnceLock,
 };
 
 // ============================================================================
@@ -62,7 +70,6 @@ pub struct Config {
     pub icons_enabled: bool,
 }
 
-// Default fallback generator functions for serde attributes
 fn default_show_hidden() -> bool { false }
 fn default_icons_enabled() -> bool { true }
 
@@ -77,7 +84,6 @@ impl Default for Config {
 
 impl Config {
     /// Attempts to load configuration from `~/.config/qs/config.toml`.
-    /// Falls back to default values if the file is missing or malformed.
     fn load() -> Self {
         let config_path = std::env::var("HOME")
             .map(|home| PathBuf::from(home).join(".config/qs/config.toml"))
@@ -99,21 +105,18 @@ impl Config {
 // APPLICATION STATE & DATA STRUCTURES
 // ============================================================================
 
-/// Defines the operational state/mode of the file explorer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    Normal,         // Standard file navigation and preview mode
-    AiInspection,   // AI Semantic Inspection / Help reference view
+    Normal,
+    AiInspection,
 }
 
-/// Metadata structure representing an individual file or folder entry
 struct FileItem {
     name: String,
     path: PathBuf,
     is_dir: bool,
 }
 
-/// Central application state container holding paths, items, selections, and config
 struct App {
     current_path: PathBuf,
     parent_path: Option<PathBuf>,
@@ -122,10 +125,10 @@ struct App {
     mode: Mode,
     ai_summary: String,
     config: Config,
+    preview_scroll: usize,
 }
 
 impl App {
-    /// Initializes application state starting in the current working directory and loading dotfile configuration
     fn new() -> io::Result<Self> {
         let current_path = std::env::current_dir()?;
         let config = Config::load();
@@ -137,12 +140,12 @@ impl App {
             mode: Mode::Normal,
             ai_summary: String::from("Ready. Press ^A for AI Summary, '?' for Help."),
             config,
+            preview_scroll: 0,
         };
         app.refresh_directory()?;
         Ok(app)
     }
 
-    /// Reads directory contents, filters hidden files based on configuration, and sorts entries alphabetically (directories first)
     fn refresh_directory(&mut self) -> io::Result<()> {
         self.items.clear();
         self.parent_path = self.current_path.parent().map(|p| p.to_path_buf());
@@ -159,7 +162,6 @@ impl App {
                     .to_string_lossy()
                     .into_owned();
                 
-                // Filter out dotfiles if `show_hidden` is disabled in config
                 if !self.config.show_hidden && name.starts_with('.') {
                     continue;
                 }
@@ -173,7 +175,6 @@ impl App {
                 }
             }
 
-            // Sort directories and files alphabetically
             dirs.sort_by(|a, b| a.name.cmp(&b.name));
             files.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -181,7 +182,6 @@ impl App {
             self.items.extend(files);
         }
 
-        // Ensure selected index stays within valid array bounds
         if self.selected_index >= self.items.len() && !self.items.is_empty() {
             self.selected_index = self.items.len() - 1;
         } else if self.items.is_empty() {
@@ -191,43 +191,42 @@ impl App {
         Ok(())
     }
 
-    /// Moves the selection cursor down to the next list item
     fn next(&mut self) {
         if !self.items.is_empty() && self.selected_index < self.items.len() - 1 {
             self.selected_index += 1;
+            self.preview_scroll = 0;
         }
     }
 
-    /// Moves the selection cursor up to the previous list item
     fn previous(&mut self) {
         if self.selected_index > 0 {
             self.selected_index -= 1;
+            self.preview_scroll = 0;
         }
     }
 
-    /// Navigates into the currently selected directory
     fn enter(&mut self) -> io::Result<()> {
         if let Some(item) = self.items.get(self.selected_index) {
             if item.is_dir {
                 self.current_path = item.path.clone();
                 self.selected_index = 0;
+                self.preview_scroll = 0;
                 self.refresh_directory()?;
             }
         }
         Ok(())
     }
 
-    /// Navigates back up to the parent directory
     fn back(&mut self) -> io::Result<()> {
         if let Some(parent) = self.parent_path.clone() {
             self.current_path = parent;
             self.selected_index = 0;
+            self.preview_scroll = 0;
             self.refresh_directory()?;
         }
         Ok(())
     }
 
-    /// Triggers simulated AI semantic inspection on the currently highlighted file or folder
     fn trigger_ai_inspection(&mut self) {
         if let Some(item) = self.items.get(self.selected_index) {
             self.mode = Mode::AiInspection;
@@ -245,127 +244,121 @@ impl App {
         }
     }
 
-    /// Displays shortcut key reference in the inspection pane
     fn show_help(&mut self) {
         self.mode = Mode::AiInspection;
         self.ai_summary = String::from(
-            "📖 QuickSilver Direct Keybindings:\n\
-            - .        : Toggle show/hide dotfiles\n\
-            - i        : Toggle Nerd Font icons\n\
-            - r        : Reload ~/.config/qs/config.toml\n\
-            - ~ or g   : Jump to Home directory\n\
-            - ^A       : AI Semantic Inspection\n\
-            - j/k/h/l  : Vim Navigation\n\
-            - ?        : Show this Help overlay\n\
-            - q        : Quit QuickSilver"
+            "📖 QuickSilver Navigation Guide:\n\
+            - Up / k       : Move selection up\n\
+            - Down / j     : Move selection down\n\
+            - Right / l / Enter : Enter directory\n\
+            - Left / h     : Go to parent directory\n\
+            - Mouse Wheel  : Scroll preview contents\n\
+            - .            : Toggle dotfiles\n\
+            - i            : Toggle icons\n\
+            - ^A           : AI Semantic Inspection\n\
+            - ?            : Help overlay\n\
+            - q            : Quit"
         );
     }
 }
 
 // ============================================================================
-// ICON & SYNTAX HIGHLIGHTER UTILITIES
+// ELITE CACHED SYNTAX HIGHLIGHTING & UTILITIES
 // ============================================================================
 
-/// Returns appropriate Nerd Font webdev icons based on file extension, name, or type
+struct HighlighterEngine {
+    syntax_set: SyntaxSet,
+    theme_set: ThemeSet,
+}
+
+fn get_highlighter_engine() -> &'static HighlighterEngine {
+    static ENGINE: OnceLock<HighlighterEngine> = OnceLock::new();
+    ENGINE.get_or_init(|| HighlighterEngine {
+        syntax_set: SyntaxSet::load_defaults_newlines(),
+        theme_set: ThemeSet::load_defaults(),
+    })
+}
+
 fn get_file_icon(name: &str, is_dir: bool) -> &str {
     if is_dir {
-        return " "; // Folder icon
+        return " ";
     }
     if name.ends_with(".rs") {
-        " " // Rust icon
+        " "
     } else if name.ends_with(".toml") || name.ends_with(".json") || name.ends_with(".yaml") || name.ends_with(".yml") {
-        " " // Config / gear icon
+        " "
     } else if name.ends_with(".md") {
-        " " // Markdown icon
+        " "
     } else if name.starts_with(".git") {
-        " " // Git icon
+        " "
     } else if name.ends_with(".lock") {
-        "󰌆 " // Lock icon
+        "󰌆 "
     } else {
-        "󰈙 " // Default generic file icon
+        "󰈙 "
     }
 }
 
-/// Lightweight syntax highlighter styled with Catppuccin Mocha for code file previews
-fn highlight_code_line(line_str: &str) -> Line<'static> {
-    let trimmed = line_str.trim();
-    
-    // Colorize comments
-    if trimmed.starts_with("//") || trimmed.starts_with('#') {
-        return Line::from(Span::styled(line_str.to_string(), Style::default().fg(COLOR_SUBTEXT)));
-    }
-    
-    // Tokenize line and colorize keywords, types, and literals
-    let mut spans = Vec::new();
-    let words: Vec<&str> = line_str.split_inclusive(|c: char| !c.is_alphanumeric() && c != '_').collect();
-    
-    for word in words {
-        let color = match word.trim() {
-            // Keywords
-            "fn" | "let" | "mut" | "pub" | "struct" | "enum" | "impl" | "use" | "mod" | 
-            "match" | "if" | "else" | "for" | "in" | "while" | "loop" | "return" | 
-            "const" | "static" | "trait" | "where" | "async" | "await" | "move" => COLOR_MAUVE,
-            
-            // Types & Booleans
-            "true" | "false" | "String" | "Vec" | "Option" | "Result" | "PathBuf" | 
-            "u32" | "usize" | "i32" | "bool" | "f64" | "Self" => COLOR_BLUE,
-            
-            _ => {
-                if word.starts_with('"') || word.ends_with('"') || word.starts_with('\'') {
-                    COLOR_GREEN // Strings
-                } else {
-                    COLOR_TEXT  // Default text
-                }
-            }
-        };
-        spans.push(Span::styled(word.to_string(), Style::default().fg(color)));
-    }
-    
-    Line::from(spans)
-}
+/// Elite-grade cached syntax highlighter with precise filename/extension scoping and vibrant themes
+fn highlight_code_file(contents: &str, file_name: &str, extension: &str) -> Vec<Line<'static>> {
+    let engine = get_highlighter_engine();
 
-// ============================================================================
-// MAIN ENTRY POINT & CLI FLAG HANDLING
-// ============================================================================
+    let syntax = engine
+        .syntax_set
+        .find_syntax_for_file(file_name)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            engine.syntax_set
+                .find_syntax_by_extension(extension)
+                .unwrap_or_else(|| engine.syntax_set.find_syntax_plain_text())
+        });
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // --- 1. Command-Line Arguments Parsing for Flags ---
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "--version" | "-V" => {
-                println!("quicksilver 0.1.0");
-                return Ok(());
+    let theme = &engine.theme_set.themes["base16-eighties.dark"];
+    let mut h = HighlightLines::new(syntax, theme);
+
+    let lines_count = contents.lines().count();
+    let mut highlighted_lines = Vec::with_capacity(lines_count);
+
+    for line in LinesWithEndings::from(contents) {
+        if let Ok(ranges) = h.highlight_line(line, &engine.syntax_set) {
+            let mut spans = Vec::with_capacity(ranges.len());
+            for (style, text) in ranges {
+                let fg_color = Color::Rgb(
+                    style.foreground.r,
+                    style.foreground.g,
+                    style.foreground.b,
+                );
+                spans.push(Span::styled(text.to_string(), Style::default().fg(fg_color)));
             }
-            "--help" | "-h" => {
-                println!("QuickSilver (qs) 0.1.0");
-                println!("A blazing-fast, next-gen terminal file explorer written in Rust, powered by Tokio async IO, styled with Catppuccin Mocha.");
-                println!("\nUsage: qs [options]");
-                println!("\nOptions:");
-                println!("  -V, --version     Print version information");
-                println!("  -h, --help        Print help information");
-                return Ok(());
-            }
-            _ => {}
+            highlighted_lines.push(Line::from(spans));
+        } else {
+            highlighted_lines.push(Line::from(line.to_string()));
         }
     }
 
-    // --- 2. Terminal UI Initialization ---
+    highlighted_lines
+}
+
+// ============================================================================
+// MAIN & EVENT LOOP
+// ============================================================================
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Instantiate core application state
     let mut app = App::new()?;
-
-    // --- 3. Main Event & Render Loop ---
     let res = run_app(&mut terminal, &mut app);
 
-    // --- 4. Terminal Restoration on Exit ---
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     if let Err(err) = res {
@@ -375,104 +368,109 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ============================================================================
-// EVENT LOOP & INPUT ROUTING
-// ============================================================================
-
-/// Core event loop managing terminal redraws and keyboard inputs across modes
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> io::Result<()> {
     loop {
-        // Draw the user interface on each tick
         terminal.draw(|f| ui(f, app))?;
 
-        // Read incoming terminal events
-        if let Event::Key(key) = event::read()? {
-            // Global quit shortcut
-            if key.code == KeyCode::Char('q') {
-                return Ok(());
-            }
-
-            // Ctrl + A shortcut for AI Semantic Inspection
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a') {
-                app.trigger_ai_inspection();
-                continue;
-            }
-
-            // Mode-specific input routing
-            match app.mode {
-                Mode::AiInspection => {
-                    // Any key press exits AI inspection / Help mode and returns to normal view
-                    app.mode = Mode::Normal;
-                    app.ai_summary = String::from("Ready. Press ^A for AI Summary, '?' for Help.");
+        match event::read()? {
+            Event::Key(key) => {
+                if key.code == KeyCode::Char('q') {
+                    return Ok(());
                 }
-                Mode::Normal => {
-                    match key.code {
-                        KeyCode::Char('.') => {
-                            app.config.show_hidden = !app.config.show_hidden;
-                            app.refresh_directory()?;
-                        }
-                        KeyCode::Char('i') => {
-                            app.config.icons_enabled = !app.config.icons_enabled;
-                        }
-                        KeyCode::Char('r') => {
-                            app.config = Config::load();
-                            app.refresh_directory()?;
-                        }
-                        KeyCode::Char('~') | KeyCode::Char('g') => {
-                            if let Ok(home) = std::env::var("HOME") {
-                                app.current_path = PathBuf::from(home);
-                                app.selected_index = 0;
+
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('a') {
+                    app.trigger_ai_inspection();
+                    continue;
+                }
+
+                match app.mode {
+                    Mode::AiInspection => {
+                        app.mode = Mode::Normal;
+                        app.ai_summary = String::from("Ready. Press ^A for AI Summary, '?' for Help.");
+                    }
+                    Mode::Normal => {
+                        match key.code {
+                            KeyCode::Char('.') => {
+                                app.config.show_hidden = !app.config.show_hidden;
                                 app.refresh_directory()?;
                             }
+                            KeyCode::Char('i') => {
+                                app.config.icons_enabled = !app.config.icons_enabled;
+                            }
+                            KeyCode::Char('r') => {
+                                app.config = Config::load();
+                                app.refresh_directory()?;
+                            }
+                            KeyCode::Char('~') | KeyCode::Char('g') => {
+                                if let Ok(home) = std::env::var("HOME") {
+                                    app.current_path = PathBuf::from(home);
+                                    app.selected_index = 0;
+                                    app.preview_scroll = 0;
+                                    app.refresh_directory()?;
+                                }
+                            }
+                            KeyCode::Char('?') => {
+                                app.show_help();
+                            }
+                            KeyCode::PageDown => {
+                                app.preview_scroll = app.preview_scroll.saturating_add(5);
+                            }
+                            KeyCode::PageUp => {
+                                app.preview_scroll = app.preview_scroll.saturating_sub(5);
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => app.next(),
+                            KeyCode::Up | KeyCode::Char('k') => app.previous(),
+                            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => app.enter()?,
+                            KeyCode::Left | KeyCode::Char('h') => app.back()?,
+                            _ => {}
                         }
-                        KeyCode::Char('?') => {
-                            app.show_help();
-                        }
-                        KeyCode::Char('j') | KeyCode::Down => app.next(),
-                        KeyCode::Char('k') | KeyCode::Up => app.previous(),
-                        KeyCode::Char('l') | KeyCode::Enter => app.enter()?,
-                        KeyCode::Char('h') => app.back()?,
-                        _ => {}
                     }
                 }
             }
+            Event::Mouse(mouse) => {
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => {
+                        app.preview_scroll = app.preview_scroll.saturating_add(3);
+                    }
+                    MouseEventKind::ScrollUp => {
+                        app.preview_scroll = app.preview_scroll.saturating_sub(3);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
 }
 
 // ============================================================================
-// USER INTERFACE RENDERING ENGINE
+// UI RENDERING ENGINE
 // ============================================================================
 
-/// Renders the 3-column Miller Columns layout styled with Catppuccin Mocha
 fn ui(f: &mut ratatui::Frame, app: &App) {
     let size = f.size();
-
-    // Use solid Catppuccin Mocha base background color
     let bg_color = COLOR_BASE;
 
-    // Split terminal screen vertically: Main content area on top, status bar at the bottom
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(1)].as_ref())
         .split(size);
 
-    // Split content area horizontally into 3 Miller Columns: [Parent Preview, Active Directory, Live Preview / AI]
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(25), // Column 1: Parent directory preview
-            Constraint::Percentage(45), // Column 2: Active directory file list
-            Constraint::Percentage(30), // Column 3: Live file preview / AI inspection
+            Constraint::Percentage(20),
+            Constraint::Percentage(40),
+            Constraint::Percentage(40),
         ])
         .split(chunks[0]);
 
-    // --- Column 1: Parent Directory Preview ---
+    // --- Column 1: Parent Directory ---
     let parent_title = if let Some(p) = &app.parent_path {
-        format!(" Parent: {} ", p.display())
+        format!(" Parent: {} ", p.file_name().and_then(|n| n.to_str()).unwrap_or(".."))
     } else {
         String::from(" Parent: None ")
     };
@@ -498,7 +496,6 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            // Conditionally prepend Nerd Font icons based on configuration
             let display_text = if app.config.icons_enabled {
                 let icon = get_file_icon(&item.name, item.is_dir);
                 format!("{} {}", icon, item.name)
@@ -506,7 +503,6 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
                 item.name.clone()
             };
             
-            // Highlight selected index and colorize directories vs. files
             let style = if i == app.selected_index {
                 Style::default()
                     .bg(COLOR_SURFACE)
@@ -531,10 +527,10 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         );
     f.render_widget(list, columns[1]);
 
-    // --- Column 3: Live Preview / Syntax Highlighted Code / AI Inspection Pane ---
+    // --- Column 3: Live Preview / AI Inspection Pane ---
     let preview_title = match app.mode {
         Mode::AiInspection => " 🤖 AI / Shortcut Reference ",
-        _ => " 👁️ Live Preview (Syntax Highlighted) ",
+        _ => " 👁️ Live Preview ",
     };
 
     let preview_widget = if app.mode == Mode::AiInspection {
@@ -552,17 +548,19 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
             match fs::read_dir(&selected.path) {
                 Ok(entries) => {
                     let mut preview_str = String::from("Directory Contents:\n");
-                    for entry in entries.take(15).flatten() {
+                    for entry in entries.flatten() {
                         let name = entry.file_name().to_string_lossy().into_owned();
                         preview_str.push_str(&format!("- {}\n", name));
                     }
-                    Paragraph::new(preview_str).block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(COLOR_GREEN))
-                            .style(Style::default().bg(bg_color).fg(COLOR_TEXT))
-                            .title(preview_title),
-                    )
+                    Paragraph::new(preview_str)
+                        .scroll((app.preview_scroll as u16, 0))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(COLOR_GREEN))
+                                .style(Style::default().bg(bg_color).fg(COLOR_TEXT))
+                                .title(preview_title),
+                        )
                 }
                 Err(_) => Paragraph::new("Unable to read directory contents.").block(
                     Block::default()
@@ -575,19 +573,26 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         } else {
             match fs::read_to_string(&selected.path) {
                 Ok(contents) => {
-                    let highlighted_lines: Vec<Line> = contents
-                        .lines()
-                        .take(20)
-                        .map(|line| highlight_code_line(line))
-                        .collect();
+                    let ext = selected.path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    let fname = selected.path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
                     
-                    Paragraph::new(highlighted_lines).block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(COLOR_GREEN))
-                            .style(Style::default().bg(bg_color))
-                            .title(preview_title),
-                    )
+                    let highlighted_lines = highlight_code_file(&contents, fname, ext);
+                    
+                    Paragraph::new(highlighted_lines)
+                        .scroll((app.preview_scroll as u16, 0))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(COLOR_GREEN))
+                                .style(Style::default().bg(bg_color))
+                                .title(preview_title),
+                        )
                 }
                 Err(_) => Paragraph::new("Binary file or unreadable preview.").block(
                     Block::default()
@@ -613,7 +618,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     // --- Status Bar Footer ---
     let status_text = match app.mode {
         Mode::AiInspection => " Press any key to return ",
-        _ => " Ready. | ^A: AI | .: Dotfiles | i: Icons | r: Reload | ~: Home | ?: Help | q: Quit ",
+        _ => " Ready. | Arrows/jklh: Navigate | Mouse Wheel: Scroll | ^A: AI | ?: Help | q: Quit ",
     };
 
     let status_bar = Paragraph::new(status_text).style(
