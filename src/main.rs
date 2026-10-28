@@ -5,7 +5,8 @@
  * Description:  A blazing-fast, next-gen terminal file explorer written in Rust,
  *               powered by Ratatui & Crossterm, styled with Catppuccin Mocha,
  *               featuring 3-column Miller layout, Nerd Font icons, AI inspection,
- *               dotfile configuration support, and direct keyboard shortcuts.
+ *               dotfile configuration support, direct keyboard shortcuts, and
+ *               live syntax-highlighted code previews.
  * ============================================================================
  */
 
@@ -16,12 +17,12 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
-// Import ratatui widgets, layouts, styles, and backend definitions for the TUI
+// Import ratatui widgets, layouts, styles, texts, and backend definitions for the TUI
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
@@ -102,7 +103,7 @@ impl Config {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,         // Standard file navigation and preview mode
-    AiInspection,   // Ctrl+A semantic AI code/file inspection mode
+    AiInspection,   // AI Semantic Inspection / Help reference view
 }
 
 /// Metadata structure representing an individual file or folder entry
@@ -262,7 +263,7 @@ impl App {
 }
 
 // ============================================================================
-// ICON HELPER FUNCTIONS
+// ICON & SYNTAX HIGHLIGHTER UTILITIES
 // ============================================================================
 
 /// Returns appropriate Nerd Font webdev icons based on file extension, name, or type
@@ -283,6 +284,44 @@ fn get_file_icon(name: &str, is_dir: bool) -> &str {
     } else {
         "󰈙 " // Default generic file icon
     }
+}
+
+/// Lightweight syntax highlighter styled with Catppuccin Mocha for code file previews
+fn highlight_code_line(line_str: &str) -> Line<'static> {
+    let trimmed = line_str.trim();
+    
+    // Colorize comments
+    if trimmed.starts_with("//") || trimmed.starts_with('#') {
+        return Line::from(Span::styled(line_str.to_string(), Style::default().fg(COLOR_SUBTEXT)));
+    }
+    
+    // Tokenize line and colorize keywords, types, and literals
+    let mut spans = Vec::new();
+    let words: Vec<&str> = line_str.split_inclusive(|c: char| !c.is_alphanumeric() && c != '_').collect();
+    
+    for word in words {
+        let color = match word.trim() {
+            // Keywords
+            "fn" | "let" | "mut" | "pub" | "struct" | "enum" | "impl" | "use" | "mod" | 
+            "match" | "if" | "else" | "for" | "in" | "while" | "loop" | "return" | 
+            "const" | "static" | "trait" | "where" | "async" | "await" | "move" => COLOR_MAUVE,
+            
+            // Types & Booleans
+            "true" | "false" | "String" | "Vec" | "Option" | "Result" | "PathBuf" | 
+            "u32" | "usize" | "i32" | "bool" | "f64" | "Self" => COLOR_BLUE,
+            
+            _ => {
+                if word.starts_with('"') || word.ends_with('"') || word.starts_with('\'') {
+                    COLOR_GREEN // Strings
+                } else {
+                    COLOR_TEXT  // Default text
+                }
+            }
+        };
+        spans.push(Span::styled(word.to_string(), Style::default().fg(color)));
+    }
+    
+    Line::from(spans)
 }
 
 // ============================================================================
@@ -492,14 +531,22 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         );
     f.render_widget(list, columns[1]);
 
-    // --- Column 3: Live Preview / AI Semantic Inspection Pane ---
+    // --- Column 3: Live Preview / Syntax Highlighted Code / AI Inspection Pane ---
     let preview_title = match app.mode {
         Mode::AiInspection => " 🤖 AI / Shortcut Reference ",
-        _ => " 👁️ Live Preview ",
+        _ => " 👁️ Live Preview (Syntax Highlighted) ",
     };
 
-    let preview_content = if app.mode == Mode::AiInspection {
-        app.ai_summary.clone()
+    let preview_widget = if app.mode == Mode::AiInspection {
+        Paragraph::new(app.ai_summary.clone())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(COLOR_GREEN))
+                    .style(Style::default().bg(bg_color).fg(COLOR_TEXT))
+                    .title(preview_title),
+            )
+            .wrap(ratatui::widgets::Wrap { trim: true })
     } else if let Some(selected) = app.items.get(app.selected_index) {
         if selected.is_dir {
             match fs::read_dir(&selected.path) {
@@ -509,32 +556,59 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
                         let name = entry.file_name().to_string_lossy().into_owned();
                         preview_str.push_str(&format!("- {}\n", name));
                     }
-                    preview_str
+                    Paragraph::new(preview_str).block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(COLOR_GREEN))
+                            .style(Style::default().bg(bg_color).fg(COLOR_TEXT))
+                            .title(preview_title),
+                    )
                 }
-                Err(_) => String::from("Unable to read directory contents."),
+                Err(_) => Paragraph::new("Unable to read directory contents.").block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(COLOR_GREEN))
+                        .style(Style::default().bg(bg_color).fg(COLOR_TEXT))
+                        .title(preview_title),
+                ),
             }
         } else {
             match fs::read_to_string(&selected.path) {
                 Ok(contents) => {
-                    contents.lines().take(20).collect::<Vec<&str>>().join("\n")
+                    let highlighted_lines: Vec<Line> = contents
+                        .lines()
+                        .take(20)
+                        .map(|line| highlight_code_line(line))
+                        .collect();
+                    
+                    Paragraph::new(highlighted_lines).block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(COLOR_GREEN))
+                            .style(Style::default().bg(bg_color))
+                            .title(preview_title),
+                    )
                 }
-                Err(_) => String::from("Binary file or unreadable preview."),
+                Err(_) => Paragraph::new("Binary file or unreadable preview.").block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(COLOR_GREEN))
+                        .style(Style::default().bg(bg_color).fg(COLOR_TEXT))
+                        .title(preview_title),
+                ),
             }
         }
     } else {
-        String::from("No item selected.")
+        Paragraph::new("No item selected.").block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(COLOR_GREEN))
+                .style(Style::default().bg(bg_color).fg(COLOR_TEXT))
+                .title(preview_title),
+        )
     };
 
-    let preview_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(COLOR_GREEN))
-        .style(Style::default().bg(bg_color).fg(COLOR_TEXT))
-        .title(preview_title);
-
-    let preview_paragraph = Paragraph::new(preview_content)
-        .block(preview_block)
-        .wrap(ratatui::widgets::Wrap { trim: true });
-    f.render_widget(preview_paragraph, columns[2]);
+    f.render_widget(preview_widget, columns[2]);
 
     // --- Status Bar Footer ---
     let status_text = match app.mode {
